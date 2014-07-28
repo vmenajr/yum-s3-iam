@@ -18,15 +18,16 @@ __author__ = "Julius Seporaitis"
 __email__ = "julius@seporaitis.net"
 __copyright__ = "Copyright 2012, Julius Seporaitis"
 __license__ = "Apache 2.0"
-__version__ = "1.0.1"
+__version__ = "2.0.0"
 
 
 import urllib2
-import urlparse
+from urlparse import urlparse
 import time
 import hashlib
 import hmac
 import json
+import boto
 
 import yum
 import yum.config
@@ -80,7 +81,8 @@ class S3Repository(YumRepository):
 
     def __init__(self, repoid, baseurl):
         super(S3Repository, self).__init__(repoid)
-        self.iamrole = None
+        s3 = boto.connect_s3();
+        self.bucket = s3.get_bucket(urlparse(baseurl).netloc.split('.')[0])
         self.baseurl = baseurl
         self.grabber = None
         self.enable()
@@ -93,8 +95,6 @@ class S3Repository(YumRepository):
     def grab(self):
         if not self.grabber:
             self.grabber = S3Grabber(self)
-            self.grabber.get_role()
-            self.grabber.get_credentials()
         return self.grabber
 
 
@@ -118,119 +118,32 @@ class S3Grabber(object):
         if not self.baseurl.endswith('/'):
             self.baseurl += '/'
 
-    def get_role(self):
-        """Read IAM role from AWS metadata store."""
-        request = urllib2.Request(
-            urlparse.urljoin(
-                "http://169.254.169.254",
-                "/latest/meta-data/iam/security-credentials/"
-            ))
+    def _getpath(self, url):
+        path = urlparse(url).path
+        if path.startswith('/'):
+            path = path[1:]
+        return path
 
-        response = None
-        try:
-            response = urllib2.urlopen(request)
-            self.iamrole = (response.read())
-        finally:
-            if response:
-                response.close()
-
-    def get_credentials(self):
-        """Read IAM credentials from AWS metadata store.
-        Note: This method should be explicitly called after constructing new
-              object, as in 'explicit is better than implicit'.
-        """
-        request = urllib2.Request(
-            urlparse.urljoin(
-                urlparse.urljoin(
-                    "http://169.254.169.254/",
-                    "latest/meta-data/iam/security-credentials/",
-                ), self.iamrole))
-
-        response = None
-        try:
-            response = urllib2.urlopen(request)
-            data = json.loads(response.read())
-        finally:
-            if response:
-                response.close()
-
-        self.access_key = data['AccessKeyId']
-        self.secret_key = data['SecretAccessKey']
-        self.token = data['Token']
-
-    def _request(self, path):
-        url = urlparse.urljoin(self.baseurl, urllib2.quote(path))
-        request = urllib2.Request(url)
-        request.add_header('x-amz-security-token', self.token)
-        signature = self.sign(request)
-        request.add_header('Authorization', "AWS {0}:{1}".format(
-            self.access_key,
-            signature))
-        return request
+    def _getbucket(self):
+        return self.repo.getbucket()
 
     def urlgrab(self, url, filename=None, **kwargs):
         """urlgrab(url) copy the file to the local filesystem."""
-        request = self._request(url)
+        s3_key_name = _getpath(url)
+        key = self._getbucket().get_key(s3_key_name)
+
         if filename is None:
-            filename = request.get_selector()
-            if filename.startswith('/'):
-                filename = filename[1:]
+            filename = s3_key_name
 
-        response = None
-        try:
-            out = open(filename, 'w+')
-            response = urllib2.urlopen(request)
-            buff = response.read(8192)
-            while buff:
-                out.write(buff)
-                buff = response.read(8192)
-        finally:
-            if response:
-                response.close()
-            out.close()
-
+        key.get_contents_to_filename(filename)
         return filename
 
     def urlopen(self, url, **kwargs):
         """urlopen(url) open the remote file and return a file object."""
+        return self.bucket.get_key(s3_key_name)
         return urllib2.urlopen(self._request(url))
 
     def urlread(self, url, limit=None, **kwargs):
         """urlread(url) return the contents of the file as a string."""
         return urllib2.urlopen(self._request(url)).read()
 
-    def sign(self, request, timeval=None):
-        """Attach a valid S3 signature to request.
-        request - instance of Request
-        """
-        date = time.strftime("%a, %d %b %Y %H:%M:%S GMT", timeval or time.gmtime())
-        request.add_header('Date', date)
-        host = request.get_host()
-
-        # TODO: bucket name finding is ugly, I should find a way to support
-        # both naming conventions: http://bucket.s3.amazonaws.com/ and
-        # http://s3.amazonaws.com/bucket/
-        try:
-            pos = host.find(".s3")
-            assert pos != -1
-            bucket = host[:pos]
-        except AssertionError:
-            raise yum.plugins.PluginYumExit(
-                "s3iam: baseurl hostname should be in format: "
-                "'<bucket>.s3<aws-region>.amazonaws.com'; "
-                "found '%s'" % host)
-
-        resource = "/%s%s" % (bucket, request.get_selector(), )
-        amz_headers = 'x-amz-security-token:%s\n' % self.token
-        sigstring = ("%(method)s\n\n\n%(date)s\n"
-                     "%(canon_amzn_headers)s%(canon_amzn_resource)s") % ({
-                         'method': request.get_method(),
-                         'date': request.headers.get('Date'),
-                         'canon_amzn_headers': amz_headers,
-                         'canon_amzn_resource': resource})
-        digest = hmac.new(
-            str(self.secret_key),
-            str(sigstring),
-            hashlib.sha1).digest()
-        signature = digest.encode('base64')
-        return signature
