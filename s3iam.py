@@ -5,7 +5,7 @@
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
 #
-#     http://www.apache.org/licenses/LICENSE-2.0
+# http://www.apache.org/licenses/LICENSE-2.0
 #
 # Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
@@ -20,20 +20,13 @@ __copyright__ = "Copyright 2012, Julius Seporaitis"
 __license__ = "Apache 2.0"
 __version__ = "2.0.0"
 
-
-import urllib2
 from urlparse import urlparse
-import time
-import hashlib
-import hmac
-import json
-import boto
 
+import boto
 import yum
 import yum.config
 import yum.Errors
 import yum.plugins
-
 from yum.yumRepo import YumRepository
 
 
@@ -81,7 +74,7 @@ class S3Repository(YumRepository):
 
     def __init__(self, repoid, baseurl):
         super(S3Repository, self).__init__(repoid)
-        s3 = boto.connect_s3();
+        s3 = boto.connect_s3()
         self.bucket = s3.get_bucket(urlparse(baseurl).netloc.split('.')[0])
         self.baseurl = baseurl
         self.grabber = None
@@ -97,9 +90,11 @@ class S3Repository(YumRepository):
             self.grabber = S3Grabber(self)
         return self.grabber
 
+    def getbucket(self):
+        return self.bucket
+
 
 class S3Grabber(object):
-
     def __init__(self, repo):
         """Initialize file grabber.
         Note: currently supports only single repo.baseurl. So in case of a list
@@ -118,7 +113,8 @@ class S3Grabber(object):
         if not self.baseurl.endswith('/'):
             self.baseurl += '/'
 
-    def _getpath(self, url):
+    @staticmethod
+    def _getpath(url):
         path = urlparse(url).path
         if path.startswith('/'):
             path = path[1:]
@@ -129,7 +125,7 @@ class S3Grabber(object):
 
     def urlgrab(self, url, filename=None, **kwargs):
         """urlgrab(url) copy the file to the local filesystem."""
-        s3_key_name = _getpath(url)
+        s3_key_name = self._getpath(url)
         key = self._getbucket().get_key(s3_key_name)
 
         if filename is None:
@@ -140,10 +136,16 @@ class S3Grabber(object):
 
     def urlopen(self, url, **kwargs):
         """urlopen(url) open the remote file and return a file object."""
-        return self.bucket.get_key(s3_key_name)
-        return urllib2.urlopen(self._request(url))
+        s3_key_name = self._getpath(url)
+        return self._getbucket().get_key(s3_key_name)
 
     def urlread(self, url, limit=None, **kwargs):
-        """urlread(url) return the contents of the file as a string."""
-        return urllib2.urlopen(self._request(url)).read()
+        """urlread(url) return the contents of the file as a string.
+        :param url:
+        :param limit:
+        :param kwargs:
+        """
+        s3_key_name = self._getpath(url)
+        key = self._getbucket().get_key(s3_key_name)
+        return key.get_contents_as_string()
 
