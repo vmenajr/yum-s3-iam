@@ -20,6 +20,7 @@ __copyright__ = "Copyright 2012, Julius Seporaitis"
 __license__ = "Apache 2.0"
 __version__ = "2.0.0"
 
+import logging
 from urlparse import urlparse
 
 import boto
@@ -72,13 +73,35 @@ def postreposetup_hook(conduit):
 class S3Repository(YumRepository):
     """Repository object for Amazon S3, using IAM Roles."""
 
+
     def __init__(self, repoid, baseurl):
         super(S3Repository, self).__init__(repoid)
-        s3 = boto.connect_s3()
-        self.bucket = s3.get_bucket(urlparse(baseurl).netloc.split('.')[0])
-        self.baseurl = baseurl
+        self.logger = logging.getLogger("yum.S3Repository")
+        self.logger.debug(baseurl)
+        self.s3 = boto.connect_s3()
+        self.s3url = self._format_baseurl(baseurl)
+        urlpieces = urlparse(self.s3url)
+        self.logger.debug(urlpieces)
+        self.s3basepath = urlpieces.path
+        self.bucket = self.s3.get_bucket(urlpieces.netloc.split('.')[0])
         self.grabber = None
         self.enable()
+
+    def _format_baseurl(self,url):
+        rc = None
+        if isinstance(url, basestring):
+            rc = url
+        else:
+            if len(url) != 1:
+                raise yum.plugins.PluginYumExit("s3iam: must have only one baseurl")
+            else:
+                rc = url.pop()
+
+        # Ensure urljoin doesn't ignore base path:
+        if not rc.endswith('/'):
+            rc += '/'
+
+	return rc
 
     @property
     def grabfunc(self):
@@ -91,33 +114,37 @@ class S3Repository(YumRepository):
         return self.grabber
 
     def getbucket(self):
+        self.logger.debug(self.bucket)
         return self.bucket
+
+    def geturl(self):
+	return self.s3url
+
+    def getKeyPath(self,key):
+	rc = '{base}{key}'.format(base=self.s3basepath, key=key)
+	self.logger.debug('getKeyPath()={rc}'.format(rc=rc))
+	return rc
 
 
 class S3Grabber(object):
+
     def __init__(self, repo):
         """Initialize file grabber.
         Note: currently supports only single repo.baseurl. So in case of a list
               only the first item will be used.
         """
+        self.logger = logging.getLogger("yum.S3Grabber")
+        self.repo = repo
         if isinstance(repo, basestring):
             self.baseurl = repo
         else:
-            if len(repo.baseurl) != 1:
-                raise yum.plugins.PluginYumExit("s3iam: repository '{0}' "
-                                                "must have only one "
-                                                "'baseurl' value" % repo.id)
-            else:
-                self.baseurl = repo.baseurl[0]
-        # Ensure urljoin doesn't ignore base path:
-        if not self.baseurl.endswith('/'):
-            self.baseurl += '/'
-
-    @staticmethod
-    def _getpath(url):
+            self.baseurl = repo.geturl()
+        
+    def _getpath(self, url):
         path = urlparse(url).path
         if path.startswith('/'):
             path = path[1:]
+        self.logger.debug(path)
         return path
 
     def _getbucket(self):
@@ -125,7 +152,7 @@ class S3Grabber(object):
 
     def urlgrab(self, url, filename=None, **kwargs):
         """urlgrab(url) copy the file to the local filesystem."""
-        s3_key_name = self._getpath(url)
+        s3_key_name = self.repo.getKeyPath(self._getpath(url))
         key = self._getbucket().get_key(s3_key_name)
 
         if filename is None:
